@@ -1,0 +1,917 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>数字推理ゲーム </title>
+<style>
+body { font-family: sans-serif; background:#f5f5f5; text-align:center; padding:10px; }
+.row { display:flex; justify-content:center; gap:8px; margin:10px 0; }
+.num { width:45px; height:45px; line-height:45px; border:2px solid #333; border-radius:8px; font-size:18px; background:white; }
+.hidden { background:#999; color:white; }
+.revealed { background:#2196f3; color:white; }
+.selected { background:#ff9800; color:white; }
+.clickable { cursor:pointer; }
+button { margin:5px; padding:8px 14px; font-size:14px; }
+.numBtn { width:36px; height:36px; margin:4px; border-radius:50%; border:2px solid #333; background:white; }
+.numBtn.selected { background:#3ba93f; color:white; }
+#guessArea { display:none; }
+#guessLog { max-width:360px; margin:10px auto; background:white; padding:10px; text-align:left; font-size:14px; }
+.overlay { position:fixed; inset:0; background:rgba(0,0,0,0.7); display:none; align-items:center; justify-content:center; }
+.box { background:white; padding:30px; border-radius:12px; }
+#effectInfo { margin:10px; font-weight:bold; }
+</style>
+</head>
+<body>
+
+<h2>自分の数字</h2>
+<div class="row" id="myRow"></div>
+
+<h2>相手の配置</h2>
+<div class="row" id="enemyRow"></div>
+
+<div id="effectInfo">選択中の数字の効果: なし</div>
+
+<button id="revealBtn">選んだ数字を開示</button>
+<button id="skipBtn">このターンは開示しない</button>
+
+<div id="guessArea">
+<h3>指摘フェーズ</h3>
+<div id="numberButtons"></div>
+<p id="guessInfo">相手の？をタップ</p>
+<button id="guessBtn">指摘する</button>
+</div>
+
+<div id="replaceButtons" style="display:none;"></div>
+
+<div id="repeatArea" style="display:none"></div>
+<button id="repeatConfirmBtn" style="display:none">再発動</button>
+
+<h3>指摘ログ</h3>
+<div id="guessLog"></div>
+
+<div id="winScreen" class="overlay">
+<div class="box">
+<h1>🎉 YOU WIN 🎉</h1>
+<button onclick="location.reload()">もう一度</button>
+</div>
+</div>
+
+<div id="loseScreen" class="overlay">
+<div class="box">
+<h1>💀 YOU LOSE 💀</h1>
+<button onclick="location.reload()">もう一度</button>
+</div>
+</div>
+
+<script>
+/* ---------- 初期化 ---------- */
+const shuffle = a => a.sort(()=>Math.random()-0.5);
+let myNums = shuffle([1,2,3,4,5,6,7,8,9]).slice(0,6);
+let enemyNums = shuffle([1,2,3,4,5,6,7,8,9]).slice(0,6);
+let myRevealed = Array(6).fill(false);
+let enemyRevealed = Array(6).fill(false);
+
+let aiTried = Array.from({length:6},()=>[]);
+let aiKnownNumbers = [];
+let playerKnownEnemyNumbers = [];
+let playerExcludedEnemyNumbers = [];
+let aiExcludedNumbers = [];
+let aiAlreadyRevealed = [];
+
+let selectedMy=null;
+let effectQueue = [];
+let selectedEnemyPos=null;
+let selectedGuessNum=null;
+
+let openedThisTurn=false;
+let activeEffect=null;
+let turn=1;
+const guessLog=[];
+
+let negateEnemyEffectThisTurn = false;
+let negatePlayerEffectThisTurn = false;
+
+let skipEnemyGuessThisTurn = false;
+let skipPlayerGuessThisTurn = false;
+
+let aiRevealedThisTurn = false;
+
+let swapPhase = false; 
+let swapTargets = []; 
+
+let playerGuessRemaining = 1;
+let aiGuessRemaining = 1;
+
+let aiGuessedPositionsThisTurn = [];
+let aiGuessCountThisTurn = 0;
+
+let replacePhase = false;
+let replaceFromIndex = null;
+let replaceToNumber = null;
+let replaceCandidates = []; 
+
+let playerRevealedEffects = [];
+let aiRevealedEffects = [];
+let repeatPhase = false;
+let repeatCandidates = [];
+let selectedRepeatEffect = null;
+
+let effect9Active = false;
+let aiEffect9Active = false;
+
+let aiAlreadyUsedEffect1 = false;
+
+const effectMap={
+1: "相手が開示した数字の効果を無効化",
+2: "相手の数字をランダムに1つ確認",
+3: "相手にない数字をランダムに2つ確認",
+4: "相手の指摘フェーズをスキップ",
+5: "自分の未公開数字2つの位置を入れ替える",
+6: "このターン、指摘を2回行える",
+7: "自分の未公開数字を場にない数字と交換できる",
+8: "開示済数字の効果をもう一度発動できる",
+9: "すべての未公開数字を指摘可能（間違うと敗北）"
+};
+
+function resolveEffects(){
+effectQueue.sort((a,b)=>{
+if(a.num !== b.num) return a.num - b.num;
+return a.owner === "player" ? -1 : 1;
+});
+
+for(const e of effectQueue){
+// 無効化判定
+if(e.owner === "player" && negatePlayerEffectThisTurn){
+guessLog.push(`あなたの効果${e.num}は無効化された`);
+continue;
+}
+if(e.owner === "ai" && negateEnemyEffectThisTurn){
+guessLog.push(`AIの効果${e.num}は無効化された`);
+continue;
+}
+
+// 効果1は「フラグを立てるだけ」
+if(e.num === 1){
+if(e.owner === "player"){
+negateEnemyEffectThisTurn = true;
+guessLog.push("効果1発動：AIの開示効果を無効化");
+}else{
+negatePlayerEffectThisTurn = true;
+guessLog.push("AIの効果1：あなたの開示効果を無効化");
+}
+continue;
+}
+
+// 効果4
+if(e.num === 4){
+if(e.owner === "player") skipEnemyGuessThisTurn = true;
+else skipPlayerGuessThisTurn = true;
+guessLog.push("効果4発動：指摘フェーズをスキップ");
+continue;
+}
+
+applyEffect(e.owner, e.num);
+}
+
+effectQueue = [];
+drawLog(); drawMy(); drawEnemy();
+}
+
+function applyEffect(owner, num){
+switch(num){
+case 2:
+if(owner === "player"){
+// 相手の未公開数字からランダムに1つ知る
+const candidates = enemyNums.filter(n =>
+!playerKnownEnemyNumbers.includes(n)
+);
+
+if(candidates.length){
+const known = candidates[Math.floor(Math.random()*candidates.length)];
+playerKnownEnemyNumbers.push(known);
+guessLog.push(`効果2：相手の数字に「${known}」があると判明`);
+} else {
+guessLog.push("効果2：新しく知れる数字がなかった");
+}
+} else {
+// AI側
+const candidates = myNums.filter(n =>
+!aiKnownNumbers.includes(n)
+);
+
+if(candidates.length){
+const known = candidates[Math.floor(Math.random()*candidates.length)];
+aiKnownNumbers.push(known);
+guessLog.push(`AIの効果2：あなたの数字に「${known}」があると把握した`);
+} else {
+guessLog.push("AIの効果2：新情報なし");
+}
+}
+break;
+case 3:
+if(owner === "player"){
+const allNums = [1,2,3,4,5,6,7,8,9];
+const notInEnemy = allNums.filter(n =>
+!enemyNums.includes(n) &&
+!playerExcludedEnemyNumbers.includes(n)
+);
+
+shuffle(notInEnemy);
+
+const gained = notInEnemy.slice(0,2);
+gained.forEach(n => playerExcludedEnemyNumbers.push(n));
+
+if(gained.length){
+guessLog.push(`効果3：相手にない数字「${gained.join("・")}」が判明`);
+} else {
+guessLog.push("効果3：新しく判明した数字はなかった");
+}
+} else {
+// AI側
+const allNums = [1,2,3,4,5,6,7,8,9];
+const notInPlayer = allNums.filter(n =>
+!myNums.includes(n) &&
+!aiExcludedNumbers.includes(n)
+);
+
+shuffle(notInPlayer);
+
+const gained = notInPlayer.slice(0,2);
+gained.forEach(n => aiExcludedNumbers.push(n));
+
+if(gained.length){
+guessLog.push(`AIの効果3：あなたにない数字「${gained.join("・")}」を把握した`);
+} else {
+guessLog.push("AIの効果3：新情報なし");
+}
+}
+break;
+case 5:
+if(owner === "player"){
+const unrevealed = [];
+for(let i=0;i<6;i++){
+if(!myRevealed[i]) unrevealed.push(i);
+}
+swapPhase = true;
+swapTargets = [];
+guessLog.push("効果5：入れ替える2つの位置を選択してください");
+} else {
+const unrevealed = [];
+for(let i=0;i<6;i++) if(!enemyRevealed[i]) unrevealed.push(i);
+if(unrevealed.length >= 3){
+const [a,b] = shuffle(unrevealed).slice(0,2);
+[enemyNums[a], enemyNums[b]] = [enemyNums[b], enemyNums[a]];
+guessLog.push("AIの効果5：未公開の2つの位置を入れ替えた");
+}
+}
+break;
+case 6:
+if(owner === "player"){
+playerGuessRemaining = 2;
+guessLog.push("効果6発動：このターン指摘を2回行える");
+} else {
+aiGuessRemaining = 2;
+guessLog.push("AIの効果6発動：このターン指摘を2回行う");
+}
+break;
+case 7:
+if(owner === "player"){
+replaceCandidates = [];
+for(let i=1;i<=9;i++){
+if(!myNums.includes(i)){
+replaceCandidates.push(i);
+}
+}
+if(replaceCandidates.length === 0){
+guessLog.push("効果7：交換できる数字がなかった");
+break;
+}
+replacePhase = true;
+replaceFromIndex = null;
+replaceToNumber = null;
+
+guessLog.push(
+`効果7発動：未公開数字を1つ選び、次に交換する数字を選択`
+);
+document.getElementById("guessArea").style.display = "none";
+document.getElementById("revealBtn").style.display = "none";
+document.getElementById("skipBtn").style.display = "none";
+drawReplaceButtons();
+} else {
+// ===== AI用 効果7 =====
+
+// AIの未公開位置
+const unrevealed = [];
+for(let i=0;i<6;i++){
+if(!enemyRevealed[i]) unrevealed.push(i);
+}
+
+if(unrevealed.length === 0){
+guessLog.push("AIの効果7：交換できる未公開数字がなかった");
+break;
+}
+
+// AIが持っていない数字
+const notInAI = [];
+for(let i=1;i<=9;i++){
+if(!enemyNums.includes(i)){
+notInAI.push(i);
+}
+}
+
+if(notInAI.length === 0){
+guessLog.push("AIの効果7：交換可能な数字がなかった");
+break;
+}
+
+const fromIndex =
+unrevealed[Math.floor(Math.random() * unrevealed.length)];
+const toNumber =
+notInAI[Math.floor(Math.random() * notInAI.length)];
+
+const oldNum = enemyNums[fromIndex];
+enemyNums[fromIndex] = toNumber;
+
+guessLog.push(
+`AIの効果7：未公開数字を場にない数字と交換した`
+);
+}
+break;
+case 8:
+if(owner === "player"){
+// 再発動フェーズ中は無視して続行
+if(!repeatPhase) {
+const candidates = playerRevealedEffects.filter(n => n !== 8);
+if(candidates.length){
+repeatPhase = true;
+repeatCandidates = candidates;
+selectedRepeatEffect = null;
+
+document.getElementById("repeatArea").style.display = "block";
+document.getElementById("repeatConfirmBtn").style.display = "inline-block";
+drawRepeatButtons();
+guessLog.push("効果8：再発動する効果を選択してください");
+}
+}
+} else {
+// AIはランダム再発動
+const candidates = aiRevealedEffects.filter(n => n !== 8);
+if(candidates.length){
+const chosen = candidates[Math.floor(Math.random()*candidates.length)];
+guessLog.push(`AIの効果8：効果${chosen}を再発動`);
+effectQueue.push({ owner:"ai", num:chosen });
+}
+}
+break;
+case 9:
+if(owner === "player"){
+const unrevealedCount = myRevealed.filter(v=>!v).length;
+playerGuessRemaining = unrevealedCount; // 未公開全て指摘可能
+effect9Active = true; // フラグを立てる
+guessLog.push(`効果9発動：未公開数字すべてを指摘可能（間違うと敗北）`);
+} else {
+const unrevealedCount = enemyRevealed.filter(v=>!v).length;
+aiGuessRemaining = unrevealedCount;
+aiEffect9Active = true; // AI用フラグ
+guessLog.push(`AIの効果9発動：未公開数字すべてを指摘可能（間違うと敗北）`);
+}
+break;
+}
+drawLog();
+drawMy();
+drawEnemy();
+}
+
+/* ---------- 描画 ---------- */
+function drawReplaceButtons(){
+const area = document.getElementById("replaceButtons");
+area.innerHTML = "";
+area.style.display = "block";
+replaceCandidates.forEach(n=>{
+const b = document.createElement("button");
+b.className = "numBtn";
+b.textContent = n;
+if(replaceToNumber === n) b.classList.add("selected");
+b.onclick = ()=>{
+replaceToNumber = n;
+drawReplaceButtons();
+tryExecuteReplace();
+};
+area.appendChild(b);
+});
+}
+function tryExecuteReplace(){
+if(replaceFromIndex === null) return;
+if(replaceToNumber === null) return;
+
+const oldNum = myNums[replaceFromIndex];
+myNums[replaceFromIndex] = replaceToNumber;
+
+guessLog.push(
+`効果7発動：位置${replaceFromIndex + 1}の ${oldNum} を ${replaceToNumber} に交換した`
+);
+
+// フェーズ終了
+replacePhase = false;
+replaceFromIndex = null;
+replaceToNumber = null;
+replaceCandidates = [];
+
+document.getElementById("replaceButtons").style.display = "none";
+
+drawMy();
+drawLog();
+startGuess();
+}
+
+
+
+function drawMy(){
+const row=document.getElementById("myRow");
+row.innerHTML="";
+const unrevealedIndices=[];
+myRevealed.forEach((v,i)=>{ if(!v) unrevealedIndices.push(i); });
+myNums.forEach((n,i)=>{
+const d=document.createElement("div");
+d.className="num clickable";
+d.textContent=n;
+if(myRevealed[i]) d.classList.add("revealed");
+if(selectedMy===i) d.classList.add("selected");
+if(replacePhase && replaceFromIndex === i){
+d.classList.add("selected");}
+d.onclick = () => {
+if (repeatPhase) return;
+if (myRevealed[i]) return;
+// --- 7：交換フェーズ ---
+if(replacePhase){
+replaceFromIndex = i;
+drawMy();
+tryExecuteReplace();
+return;
+}
+
+// --- 5：入れ替えフェーズ ---
+if(swapPhase){
+if(swapTargets.includes(i)) return;
+swapTargets.push(i);
+d.classList.add("selected");
+
+if(swapTargets.length === 2){
+const [a,b] = swapTargets;
+[myNums[a], myNums[b]] = [myNums[b], myNums[a]];
+guessLog.push(`効果5発動：位置${a+1}と${b+1}を入れ替えた`);
+swapPhase = false;
+swapTargets = [];
+replacePhase = false;
+drawMy();
+drawLog();
+startGuess();
+}
+return;
+}
+
+// 通常時の選択
+if (openedThisTurn) return;
+if(unrevealedIndices.length===1) return; // 残り1つの数字は選べない
+if(selectedMy===i){
+selectedMy=null;
+document.getElementById("effectInfo").textContent="選択中の数字の効果: なし";
+}else{
+selectedMy=i;
+document.getElementById("effectInfo").textContent=
+`選択中の数字の効果: ${effectMap[myNums[i]]||"なし"}`;
+}
+drawMy();
+};
+row.appendChild(d);
+});
+const revealBtn = document.getElementById("revealBtn");
+const unrevealedCount = myRevealed.filter(v => !v).length;
+if(selectedMy !== null && myNums[selectedMy] === 5 && unrevealedCount <= 2){
+revealBtn.disabled = true;
+} else {
+revealBtn.disabled = false;
+}
+}
+
+function drawEnemy(){
+const row=document.getElementById("enemyRow");
+row.innerHTML="";
+enemyNums.forEach((n,i)=>{
+const d=document.createElement("div");
+d.className="num";
+if(enemyRevealed[i]){
+d.textContent=n;
+d.classList.add("revealed");
+} else {
+d.textContent="?";
+d.classList.add("hidden","clickable");
+if(selectedEnemyPos===i) d.classList.add("selected");
+d.onclick=()=>{
+if(!openedThisTurn) return;
+selectedEnemyPos=i;
+document.getElementById("guessInfo").textContent=`位置${i+1}を指摘中`;
+drawEnemy();
+};
+}
+row.appendChild(d);
+});
+}
+
+function drawNumberButtons(){
+const area=document.getElementById("numberButtons");
+area.innerHTML="";
+for(let i=1;i<=9;i++){
+const b=document.createElement("button");
+b.className="numBtn";
+b.textContent=i;
+if(selectedGuessNum===i) b.classList.add("selected");
+b.onclick=()=>{
+selectedGuessNum=i;
+drawNumberButtons();
+};
+area.appendChild(b);
+}
+}
+
+document.getElementById("repeatConfirmBtn").onclick = () => {
+if(!repeatPhase || selectedRepeatEffect === null) return;
+
+// 再発動する効果だけ effectQueue に追加
+effectQueue.push({ owner: "player", num: selectedRepeatEffect });
+guessLog.push(`効果8：効果${selectedRepeatEffect}を再発動`);
+
+// フェーズ終了
+repeatPhase = false;
+repeatCandidates = [];
+selectedRepeatEffect = null;
+document.getElementById("repeatArea").style.display = "none";
+document.getElementById("repeatConfirmBtn").style.display = "none";
+
+// 自分の再発動効果だけ解決
+resolveEffects();
+
+// ★再発動中は AI の開示はしない
+
+// 指摘フェーズに戻す
+startGuess();
+drawMy(); drawEnemy(); drawLog();
+};
+
+function drawRepeatButtons(){
+const area = document.getElementById("repeatArea");
+area.innerHTML = "";
+area.style.display = "block";
+
+repeatCandidates.forEach(n=>{
+const b = document.createElement("button");
+b.className = "numBtn";
+b.textContent = n;
+if(selectedRepeatEffect === n) b.classList.add("selected");
+
+b.onclick = ()=>{
+selectedRepeatEffect = n;
+drawRepeatButtons();
+};
+
+area.appendChild(b);
+});
+}
+
+function drawLog(){
+document.getElementById("guessLog").innerHTML=guessLog.join("<br>");
+}
+
+function finishRevealPhase(){
+aiRevealTurn(); // AIが開示
+resolveEffects(); // ★ここで必ず効果解決
+
+// 効果5があればここで止まる
+if(swapPhase || replacePhase) return;
+if(!repeatPhase) startGuess();
+}
+
+// AIが開示しても安全か判定
+function aiSafeToReveal(unrevealedIndices) {
+// 効果9中は間違えるリスクがあるので開示しない
+if (aiEffect9Active) return false;
+
+// 知っている数字や有効な数字がない場合は開示しない
+const knownOrSafe = unrevealedIndices.filter(i => {
+const n = enemyNums[i];
+// 効果1は相手の効果を無効化するので安全
+// 効果8は初回回避済み、9はリスク大
+return n !== 9;
+});
+
+return knownOrSafe.length > 0;
+}
+/* ---------- AI開示 ---------- */
+function aiRevealTurn() {
+const remainingUnrevealed = enemyRevealed.filter(v => !v).length;
+if (remainingUnrevealed <= 1) return;
+
+const unrevealedIndices = [];
+enemyRevealed.forEach((v, i) => {
+if (!v && !aiAlreadyRevealed.includes(i)) unrevealedIndices.push(i);
+});
+if (!unrevealedIndices.length) return;
+
+// AIが開示すべき数字を候補として抽出
+let candidates = unrevealedIndices.filter(i => {
+const n = enemyNums[i];
+
+// 効果9は確実でなければ開示しない
+if (n === 9 && !aiCertainCanUse9()) return false;
+
+// 2,3は序盤のみ
+if ((n === 2 || n === 3) && turn > 2) return false;
+
+// 4,5,7は不利な場合のみ
+if ([4,5,7].includes(n) && !aiIsDisadvantaged()) return false;
+
+// 6は情報がそろった中盤以降
+if (n === 6 && !aiCanBenefitFrom6()) return false;
+
+// 8は初回開示を避け、再発動用に残す
+if (n === 8 && aiRevealedEffects.length === 0) return false;
+
+return true; // 開示してOK
+});
+
+if (!candidates.length) {
+guessLog.push("AIはこのターン開示を見送った");
+drawLog();
+return;
+}
+
+// 候補の中からランダムで1つ選ぶ
+const idx = candidates[Math.floor(Math.random() * candidates.length)];
+const num = enemyNums[idx];
+
+enemyRevealed[idx] = true;
+aiAlreadyRevealed.push(idx);
+aiRevealedEffects.push(num);
+guessLog.push(`AIが数字${num}を開示！`);
+
+// 効果キューに追加
+effectQueue.push({ owner: "ai", num: num });
+
+drawEnemy();
+drawLog();
+}
+/* ---------- AI補助関数 ---------- */
+// AIが不利かどうか判定
+function aiIsDisadvantaged() {
+const myRevealedCount = myRevealed.filter(v => v).length;
+const aiRevealedCount = enemyRevealed.filter(v => v).length;
+return aiRevealedCount < myRevealedCount;
+}
+
+// 効果6が有効か
+function aiCanBenefitFrom6() {
+const remaining = myRevealed.filter(v => !v).length;
+return remaining >= 2;
+}
+
+// 効果9が安全か
+function aiCertainCanUse9() {
+const unknowns = myNums.map((n,i)=>!myRevealed[i]?n:null).filter(n=>n!==null);
+return unknowns.every(n => aiKnownNumbers.includes(n));
+}
+// ---------- AI推理 ----------
+function aiGuessTurn() {
+const revealedNumbers = myNums.filter((n, i) => myRevealed[i]);
+
+// 未開示ポジション
+const availablePositions = [];
+for (let i = 0; i < 6; i++) {
+if (!myRevealed[i] && !aiGuessedPositionsThisTurn.includes(i)) {
+availablePositions.push(i);
+}
+}
+if (!availablePositions.length) return;
+
+// 指摘可能ポジションからランダムで選択
+const pos = availablePositions[Math.floor(Math.random() * availablePositions.length)];
+
+// 候補数字を作成（aiKnownNumbers を優先）
+let candidates = [];
+for (let n = 1; n <= 9; n++) {
+if (!aiExcludedNumbers.includes(n) && // 除外済みではない
+!aiTried[pos].includes(n) && // その位置でまだ試していない
+!revealedNumbers.includes(n)) { // すでに開示されていない
+candidates.push(n);
+}
+}
+if (!candidates.length) return;
+
+// 「知っている数字（2や3で取得済みも含む）」を優先
+const knownCandidates = candidates.filter(n => aiKnownNumbers.includes(n));
+const guessNum = knownCandidates.length
+? knownCandidates[Math.floor(Math.random() * knownCandidates.length)]
+: candidates[Math.floor(Math.random() * candidates.length)];
+
+// 指摘結果判定
+const success = myNums[pos] === guessNum;
+
+// 効果9失敗判定
+if (!success && effect9Active) {
+guessLog.push("効果9：指摘に失敗したため敗北！");
+drawLog();
+document.getElementById("loseScreen").style.display = "flex";
+return;
+}
+
+// 指摘成功時の処理
+if (success) {
+myRevealed[pos] = true;
+if (!aiKnownNumbers.includes(guessNum)) aiKnownNumbers.push(guessNum);
+}
+
+aiTried[pos].push(guessNum);
+aiGuessedPositionsThisTurn.push(pos);
+aiGuessCountThisTurn++;
+
+guessLog.push(`AI：位置${pos + 1} → ${guessNum}（${success ? "成功" : "失敗"}）`);
+
+drawMy();
+drawLog();
+
+// すべて公開されたらプレイヤー勝利
+if (myRevealed.every(v => v)) {
+document.getElementById("loseScreen").style.display = "flex";
+return;
+}
+
+// 複数回指摘可能（効果6など）
+aiGuessRemaining--;
+if (aiGuessRemaining > 0) {
+aiGuessTurn();
+}
+}
+/* ---------- 指摘フェーズ開始 ---------- */
+function startGuess() {
+if(replacePhase) return;
+if(swapPhase) return;
+if(repeatPhase) return;
+
+openedThisTurn = true;
+
+document.getElementById("revealBtn").style.display = "none";
+document.getElementById("skipBtn").style.display = "none";
+
+// スキップ判定
+if(skipPlayerGuessThisTurn){
+guessLog.push("あなたの指摘フェーズはスキップされた");
+drawLog();
+if(!skipEnemyGuessThisTurn) aiGuessTurn();
+endTurn();
+return;
+}
+
+document.getElementById("guessArea").style.display = "block";
+drawNumberButtons();
+}
+/* ---------- 操作 ---------- */
+document.getElementById("revealBtn").onclick = () => {
+if(openedThisTurn || selectedMy === null) return;
+
+const unrevealedCount = myRevealed.filter(v => !v).length;
+const num = myNums[selectedMy];
+
+// 効果8の特別判定：まだ開示した効果がない場合は開示できない
+if(num === 8 && playerRevealedEffects.length === 0){
+guessLog.push("効果8はまだ発動できません（開示済み効果が必要です）");
+drawLog();
+return;
+}
+if(myNums[selectedMy] === 5 && unrevealedCount <= 2) return;
+
+myRevealed[selectedMy] = true;
+activeEffect = myNums[selectedMy];
+playerRevealedEffects.push(activeEffect);
+effectQueue.push({ owner: "player", num: activeEffect });
+
+document.getElementById("revealBtn").style.display = "none";
+document.getElementById("skipBtn").style.display = "none";
+
+const isFirstReveal = !repeatPhase; // ★初回開示かどうか
+
+// 効果8の再発動フェーズ
+if(activeEffect === 8){
+const candidates = playerRevealedEffects.filter(n => n !== 8);
+if(candidates.length > 0){
+repeatPhase = true;
+repeatCandidates = candidates;
+selectedRepeatEffect = null;
+document.getElementById("repeatArea").style.display = "block";
+document.getElementById("repeatConfirmBtn").style.display = "inline-block";
+guessLog.push("効果8：再発動する効果を選択してください");
+drawRepeatButtons();
+}
+}
+
+// ★AI開示は初回開示のときだけ
+if(isFirstReveal){
+aiRevealTurn();
+}
+
+// 自分の効果解決（再発動中は再発動の効果だけ処理）
+resolveEffects();
+
+// repeatPhaseでなければ指摘フェーズへ
+if(!repeatPhase) startGuess();
+
+drawMy(); drawEnemy(); drawLog();
+};
+
+document.getElementById("skipBtn").onclick=()=>{
+if(openedThisTurn) return;
+selectedMy=null; drawMy();
+finishRevealPhase();
+};
+
+document.getElementById("guessBtn").onclick = () => {
+if(selectedEnemyPos === null || selectedGuessNum === null) return;
+
+const success = enemyNums[selectedEnemyPos] === selectedGuessNum;
+if(!success && (effect9Active || aiEffect9Active)){
+if(effect9Active){
+guessLog.push("効果9：指摘に失敗したため敗北！");
+drawLog();
+document.getElementById("loseScreen").style.display = "flex";
+} else {
+// AIの効果9中にプレイヤーが間違えた場合は勝利
+guessLog.push("AIの効果9：あなたの指摘に失敗したため勝利！");
+drawLog();
+document.getElementById("winScreen").style.display = "flex";
+}
+return; // ここで処理を終了
+}
+
+// 指摘成功時の処理
+if(success) enemyRevealed[selectedEnemyPos] = true;
+
+guessLog.push(`T${turn}：位置${selectedEnemyPos+1} → ${selectedGuessNum}（${success ? "成功" : "失敗"}）`);
+drawEnemy(); drawLog();
+
+if(enemyRevealed.every(v => v)){
+document.getElementById("winScreen").style.display = "flex";
+return;
+}
+
+playerGuessRemaining--;
+if(playerGuessRemaining > 0){
+selectedEnemyPos = null;
+selectedGuessNum = null;
+document.getElementById("guessInfo").textContent =
+`もう一度指摘できます（残り ${playerGuessRemaining} 回）`;
+drawEnemy();
+drawNumberButtons();
+return;
+}
+
+if(!skipEnemyGuessThisTurn){
+aiGuessTurn();
+} else {
+guessLog.push("相手の指摘フェーズはスキップされた");
+drawLog();
+}
+
+endTurn();
+};
+
+// ★ ターン終了処理 ★
+function endTurn(){
+turn++;
+playerGuessRemaining = 1;
+aiGuessRemaining = 1; 
+aiGuessedPositionsThisTurn = [];
+aiGuessCountThisTurn = 0;
+selectedEnemyPos=null; selectedGuessNum=null; selectedMy=null;
+openedThisTurn=false; activeEffect=null;
+negatePlayerEffectThisTurn = false;
+negateEnemyEffectThisTurn = false;
+skipEnemyGuessThisTurn = false;
+skipPlayerGuessThisTurn = false;
+aiRevealedThisTurn = false;
+selectedMy = null;
+swapTargets = [];
+document.getElementById("effectInfo").textContent = "選択中の数字の効果: なし";
+document.getElementById("revealBtn").style.display="inline-block";
+document.getElementById("skipBtn").style.display="inline-block";
+document.getElementById("guessArea").style.display="none";
+document.getElementById("revealBtn").disabled=false;
+document.getElementById("skipBtn").disabled=false;
+document.getElementById("guessInfo").textContent="相手の？をタップ";
+
+drawMy(); drawEnemy(); drawNumberButtons();
+};
+
+/* ---------- 初回描画 ---------- */
+drawMy(); drawEnemy(); drawNumberButtons(); drawLog();
+</script>
+</body>
+</html>
